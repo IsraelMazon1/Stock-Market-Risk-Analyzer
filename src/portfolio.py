@@ -44,8 +44,6 @@ def portfolio_daily_returns(log_returns: pd.DataFrame, weights: np.ndarray) -> p
     if log_returns.shape[1] != w.shape[0]:
         raise ValueError("weights length must match number of assets.")
 
-    # weighted sum of columns
     portfolio_returns = log_returns @ w
     portfolio_returns.name = "portfolio_log_return"
     return portfolio_returns
-

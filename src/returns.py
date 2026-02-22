@@ -52,3 +52,21 @@ def covariance_matrix(log_returns: pd.DataFrame, trading_days: int = 252) -> pd.
     if log_returns is None or log_returns.empty:
         raise ValueError("log_returns is empty.")
     return log_returns.cov() * trading_days
+
+
+def rolling_annualized_volatility(
+    daily_returns: pd.Series,
+    window: int = 30,
+    trading_days: int = 252,
+) -> pd.Series:
+    """
+    Rolling annualized volatility:
+      vol_t = std(returns_{t-window:t}) * sqrt(trading_days)
+
+    This captures time-varying risk (volatility clustering).
+    """
+    if daily_returns is None or daily_returns.empty:
+        raise ValueError("daily_returns is empty.")
+    if window < 2:
+        raise ValueError("window must be >= 2")
+    return daily_returns.rolling(window).std(ddof=1) * np.sqrt(trading_days)
