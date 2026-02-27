@@ -63,14 +63,25 @@ def cvar_historical(
 ) -> float:
     """
     Historical CVaR (Expected Shortfall): average loss beyond VaR threshold.
+    Robust to NaNs and small samples.
     """
     if daily_returns is None or daily_returns.empty:
         raise ValueError("daily_returns is empty.")
+
+    s = daily_returns.dropna()
+    if len(s) < 20:
+        raise ValueError("Not enough return observations to compute CVaR reliably.")
+
     alpha = 1.0 - confidence_level
-    threshold = float(daily_returns.quantile(alpha))
-    tail = daily_returns[daily_returns <= threshold]
+    threshold = float(s.quantile(alpha))
+
+    tail = s[s <= threshold]
+
+    # Guarantee at least one observation in the tail
     if tail.empty:
-        raise RuntimeError("No tail observations found for CVaR.")
+        k = max(1, int(np.ceil(alpha * len(s))))
+        tail = s.nsmallest(k)
+
     return float((-tail.mean()) * portfolio_value)
 
 
