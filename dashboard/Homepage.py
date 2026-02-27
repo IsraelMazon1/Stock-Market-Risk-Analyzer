@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
@@ -22,6 +23,9 @@ from src.risk_metrics import (
     distribution_diagnostics,
     normal_pdf_overlay,
 )
+
+def save_results_to_session(**kwargs):
+    st.session_state["risk_app_results"] = kwargs
 
 st.set_page_config(page_title="Stock Risk Analyzer", layout="wide")
 st.title("Stock Risk Analyzer Dashboard")
@@ -67,14 +71,57 @@ except Exception as e:
 if prices.empty:
     st.error("No price data returned. Check tickers and date range.")
     st.stop()
+# After fetching prices
+prices = prices.sort_index()
+
+# Option A (strict): keep only dates where ALL tickers have prices
+prices = prices.dropna(how="any")
+
+# (Optional) If you want to be less strict:
+# prices = prices.ffill().dropna(how="any")
 
 log_returns = compute_log_returns(prices)
+log_returns = log_returns.dropna(how="any")
 
-# ---- Weights (simple + essential: equal-weight; add your sliders here if you want) ----
-weights = np.ones(len(ticker_list)) / len(ticker_list)
+# ---- Weights (user-adjustable, auto-normalized) ----
+st.subheader("Portfolio Weights")
+
+default_w = np.ones(len(ticker_list)) / len(ticker_list)
+weights_key = f"weights::{','.join(ticker_list)}"
+
+weights = []
+cols = st.columns(min(len(ticker_list), 4))
+
+for i, ticker in enumerate(ticker_list):
+    with cols[i % len(cols)]:
+        w = st.slider(
+            f"{ticker}",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(default_w[i]),
+            step=0.01,
+            key=f"{weights_key}::{ticker}",
+        )
+        weights.append(w)
+
+weights = np.array(weights, dtype=float)
+
+if weights.sum() == 0:
+    st.error("Total weight cannot be 0. Increase at least one ticker weight.")
+    st.stop()
+
+# Normalize to sum to 1
+weights = weights / weights.sum()
+
+st.caption("Normalized weights (auto-scaled to sum to 1):")
+w_cols = st.columns(min(len(ticker_list), 4))
+for i, (ticker, w) in enumerate(zip(ticker_list, weights)):
+    with w_cols[i % len(w_cols)]:
+        st.write(f"**{ticker}:** {w:.2%}")
+
 portfolio_returns = portfolio_daily_returns(log_returns, weights)
 
-# ---- Point-in-time risk metrics (your current cards) ----
+# ---- Point-in-time risk metrics ----
 var_norm_dollars = var_parametric_normal(portfolio_returns, confidence, portfolio_value)
 var_hist_dollars = var_historical(portfolio_returns, confidence, portfolio_value)
 cvar_hist_dollars = cvar_historical(portfolio_returns, confidence, portfolio_value)
@@ -89,33 +136,41 @@ st.caption(
     "CVaR/Expected Shortfall is the average loss in the worst 5% of days."
 )
 
-# ---- Rolling risk (essential DS upgrade) ----
+# ---- Rolling risk ----
 st.subheader("Time-Varying Risk (Rolling Metrics)")
 
-roll_vol = rolling_annualized_volatility(portfolio_returns, window=rolling_window, trading_days=252)
+roll_vol = rolling_annualized_volatility(
+    portfolio_returns,
+    window=rolling_window,
+    trading_days=252
+)
 
-roll_var_norm = rolling_var_parametric_normal(portfolio_returns, confidence, window=rolling_window)
-roll_var_hist = rolling_var_historical(portfolio_returns, confidence, window=rolling_window)
+roll_var_norm = rolling_var_parametric_normal(
+    portfolio_returns,
+    confidence,
+    window=rolling_window
+)
+roll_var_hist = rolling_var_historical(
+    portfolio_returns,
+    confidence,
+    window=rolling_window
+)
 
 # Convert rolling VaR from return-units to dollars
 roll_var_norm_dollars = roll_var_norm * portfolio_value
 roll_var_hist_dollars = roll_var_hist * portfolio_value
 
-rolling_df = (  # helpful for st.line_chart
-    np.column_stack([roll_vol.values, roll_var_norm_dollars.values, roll_var_hist_dollars.values])
-)
-rolling_index = roll_vol.index
-# Build DataFrame manually to keep Streamlit happy
-import pandas as pd
 rolling_df = pd.DataFrame(
-    rolling_df,
-    index=rolling_index,
-    columns=["Rolling Annualized Vol", "Rolling VaR Normal ($)", "Rolling VaR Historical ($)"],
+    {
+        "Rolling Annualized Vol": roll_vol,
+        "Rolling VaR Normal ($)": roll_var_norm_dollars,
+        "Rolling VaR Historical ($)": roll_var_hist_dollars,
+    }
 )
 
 st.line_chart(rolling_df)
 
-# ---- Backtesting (model validation) ----
+# ---- Backtesting ----
 st.subheader("VaR Backtesting")
 
 bt_norm = var_backtest(portfolio_returns, roll_var_norm, confidence)
@@ -134,7 +189,7 @@ st.write(
     f"(diff vs expected: **{bt_hist['difference']:+.2%}**)"
 )
 
-# ---- Distribution diagnostics (skew/kurtosis) ----
+# ---- Distribution diagnostics ----
 st.subheader("Return Distribution Diagnostics")
 
 diag = distribution_diagnostics(portfolio_returns)
@@ -145,6 +200,23 @@ st.write(
     f"- Excess kurtosis: **{diag['excess_kurtosis']:.3f}** (0 ≈ normal; >0 = fat tails)"
 )
 
+save_results_to_session(
+    tickers=ticker_list,
+    weights=weights,
+    confidence=confidence,
+    portfolio_value=portfolio_value,
+    rolling_window=rolling_window,
+
+    # data needed for insight generation
+    portfolio_returns=portfolio_returns,
+    log_returns_assets=log_returns,  # <-- NOTE: change this to your asset log returns df
+    var_norm_dollars=var_norm_dollars,
+    var_hist_dollars=var_hist_dollars,
+    cvar_hist_dollars=cvar_hist_dollars,
+    bt_norm=bt_norm,
+    bt_hist=bt_hist,
+    diag=diag,
+)
 # ---- Charts: prices + histogram + normal overlay ----
 left, right = st.columns([2, 1])
 
@@ -159,9 +231,9 @@ with right:
     mu, sd = diag["mean"], diag["std"]
 
     fig, ax = plt.subplots()
-    counts, bins, _ = ax.hist(r, bins=50, density=True)  # density=True so pdf overlay matches scale
+    ax.hist(r, bins=50, density=True)  # density=True so pdf overlay matches scale
 
-    x = np.linspace(bins.min(), bins.max(), 300)
+    x = np.linspace(r.min(), r.max(), 300)
     y = normal_pdf_overlay(x, mu, sd)
     ax.plot(x, y)  # overlay normal pdf
 
